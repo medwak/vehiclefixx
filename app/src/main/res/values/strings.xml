@@ -65,4 +65,22 @@
     <string name="garagename">garagename</string>
     <string name="automechanic">auto mechanic</string>
     <string name="servicemechanic">service mechanic</string>
+    <string name="garages_near_me">Garages near me</string>
+    <string name="search_garages_hint">Search garages near a place</string>
+    <string name="finding_garages">Finding garages…</string>
+    <string name="garages_found">%1$d garages found, nearest %2$s away</string>
+    <string name="no_garages_found">No garages found within %1$s</string>
+    <string name="garage_search_failed">Could not load nearby garages. Check your connection and API key.</string>
+    <string name="location_unavailable">Could not get your location. Turn on location and try again.</string>
+    <string name="location_permission_needed">Location permission is needed to find garages near you.</string>
+    <string name="mechanic_found">Mechanic found: %1$s away</string>
+    <string name="mechanic_here">Mechanic is here</string>
+    <string name="no_mechanics_nearby">No mechanics online nearby yet…</string>
+    <string name="call">Call</string>
+    <string name="directions">Directions</string>
+    <string name="open_now">Open now</string>
+    <string name="closed_now">Closed now</string>
+    <string name="long_press_options">Long press for options</string>
+    <string name="hire_mechanic_title">Hire this mechanic</string>
+    <string name="hire_mechanic_message">Would you like to notify this mechanic?</string>
 </resources>

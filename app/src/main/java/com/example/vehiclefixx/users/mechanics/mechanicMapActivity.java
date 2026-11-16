@@ -68,7 +68,7 @@ import java.util.concurrent.TimeoutException;
 public class mechanicMapActivity extends AppCompatActivity implements OnMapReadyCallback {
 
     private static final String TAG = "TAG :: " + mechanicMapActivity.class.getSimpleName() + " :: ";
-    private static final int DEFAULT_ZOOM = 75;
+    private static final int DEFAULT_ZOOM = 15; // Maps zoom is ~2 (world) to ~21 (street)
     private static final int PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION = 1;
     // Keys for storing activity state.
     private static final String KEY_CAMERA_POSITION = "camera_position";
