@@ -103,7 +103,7 @@ import com.google.android.gms.maps.model.LatLng;
             }
         }
 
-        public boolean isLocationEnabled(Context context) {
+        public static boolean isLocationEnabled(Context context) {
             LocationManager locationManager = (LocationManager) context.getSystemService(Context.LOCATION_SERVICE);
             return LocationManagerCompat.isLocationEnabled(locationManager);
         }

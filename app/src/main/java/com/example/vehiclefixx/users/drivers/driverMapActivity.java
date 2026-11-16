@@ -1,16 +1,12 @@
- package com.example.vehiclefixx.users.drivers;
+package com.example.vehiclefixx.users.drivers;
 
-
-import android.content.DialogInterface;
+import android.Manifest;
+import android.annotation.SuppressLint;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
 import android.location.Location;
-import android.os.AsyncTask;
-import android.os.Build;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
@@ -20,31 +16,31 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
 import androidx.appcompat.app.AlertDialog;
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.FragmentActivity;
 
 import com.example.vehiclefixx.MainActivity;
 import com.example.vehiclefixx.R;
-import com.example.vehiclefixx.data.driver;
-import com.example.vehiclefixx.data.driverRequest;
+import com.example.vehiclefixx.data.Garage;
 import com.example.vehiclefixx.data.mechanic;
+import com.example.vehiclefixx.services.NearbyGarageFinder;
 import com.example.vehiclefixx.services.SendSms;
 import com.example.vehiclefixx.settings.CustomInfoWindowAdapter;
 import com.example.vehiclefixx.settings.vehicleFixx_Settings;
 import com.firebase.geofire.GeoFire;
 import com.firebase.geofire.GeoLocation;
+import com.firebase.geofire.GeoQuery;
+import com.firebase.geofire.GeoQueryEventListener;
 import com.google.android.gms.common.api.Status;
+import com.google.android.gms.location.CurrentLocationRequest;
 import com.google.android.gms.location.FusedLocationProviderClient;
-import com.google.android.gms.location.LocationRequest;
 import com.google.android.gms.location.LocationServices;
-import com.google.android.gms.location.places.Place;
-import com.google.android.gms.location.places.ui.PlaceAutocompleteFragment;
-import com.google.android.gms.location.places.ui.PlaceSelectionListener;
+import com.google.android.gms.location.Priority;
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.OnMapReadyCallback;
@@ -52,10 +48,13 @@ import com.google.android.gms.maps.SupportMapFragment;
 import com.google.android.gms.maps.model.BitmapDescriptorFactory;
 import com.google.android.gms.maps.model.CameraPosition;
 import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gms.maps.model.Marker;
 import com.google.android.gms.maps.model.MarkerOptions;
-import com.google.android.gms.tasks.OnCompleteListener;
-import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.CancellationTokenSource;
+import com.google.android.libraries.places.api.model.Place;
+import com.google.android.libraries.places.widget.AutocompleteSupportFragment;
+import com.google.android.libraries.places.widget.listener.PlaceSelectionListener;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.database.DataSnapshot;
@@ -65,667 +64,583 @@ import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.database.ValueEventListener;
 import com.google.gson.Gson;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Objects;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.Map;
 
+/**
+ * Driver home screen: finds garages and online mechanics near the driver.
+ *
+ * <ul>
+ *     <li>Location: fused provider {@code getCurrentLocation()} (fresh, high accuracy) with a
+ *     fallback to the last known fix, requested through the Activity Result permission API
+ *     (fine or approximate location both work).</li>
+ *     <li>Garages: Google Places API (New) Nearby Search for {@code car_repair}, ranked by
+ *     distance, so real garages show up even if they never registered in the app.</li>
+ *     <li>Mechanics: a GeoFire radius query on {@code employees_available} instead of downloading
+ *     every mechanic and filtering on the phone.</li>
+ *     <li>Search elsewhere: Places autocomplete moves the search to any place the driver picks.</li>
+ * </ul>
+ */
 public class driverMapActivity extends FragmentActivity implements OnMapReadyCallback {
-    private static final String TAG = "TAG :x: " + driverMapActivity.class.getSimpleName() + " " +
-            ":: ";
-    private static final int FAR_ZOOM = 105;
-    private static final int MID_ZOOM = 145;
-    private static final int CLOSE_ZOOM = 100;
-    private static final int PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION = 18765445;
-    // Keys for storing activity state.
+    private static final String TAG = "driverMapActivity";
+
+    // Google Maps zoom levels run from ~2 (world) to ~21 (buildings).
+    private static final float CITY_ZOOM = 13f;
+    private static final float STREET_ZOOM = 15f;
+    private static final float CLOSE_ZOOM = 17f;
+
+    /** Garage search radius; Places Nearby Search allows up to 50 km. */
+    private static final double GARAGE_RADIUS_METERS = 10_000;
+    /** Mechanic GeoFire search radius in km. */
+    private static final double MECHANIC_RADIUS_KM = 10;
+    /** A mechanic closer than this is "here". */
+    private static final float ARRIVED_METERS = 100;
+    /** Accept a cached fix up to this old before asking for a new one. */
+    private static final long MAX_LOCATION_AGE_MS = 60_000;
+
     private static final String KEY_CAMERA_POSITION = "camera_position";
     private static final String KEY_LOCATION = "location";
-    private final int RATE_REQUEST = 1254;
-    private Location lastKnownLocation;
-    private Location mLastLocation;
-    private FirebaseAuth mAuth;
-    private FirebaseUser currentUser;
-    private String destination, requestService, mPhone;
-    private LatLng destinationLatLng, pickupLocation;
-    private Marker employeeMarker, employerMarker;
-    private FusedLocationProviderClient mFusedLocationClient;
-    private LocationRequest mLocationRequest;
-    private CameraPosition cameraPosition;
-    private boolean locationPermissionGranted;
+    private static final int RATE_REQUEST = 1254;
+
+    private final Gson gson = new Gson();
+    private final Map<String, Marker> garageMarkers = new HashMap<>();
+    private final Map<String, Marker> mechanicMarkers = new HashMap<>();
+
     private GoogleMap mMap;
-    private Button logout_btn, request_btn, settings_btn, select_btn;
+    private FusedLocationProviderClient fusedLocationClient;
+    private CancellationTokenSource locationCancellation;
+    private NearbyGarageFinder garageFinder;
+
+    private FirebaseUser currentUser;
+    private DatabaseReference employeesAvailable;
+    private DatabaseReference employeesNotified;
+    private DatabaseReference ratingsRef;
+    private GeoQuery mechanicQuery;
+
+    @Nullable private Location lastKnownLocation;
+    @Nullable private CameraPosition savedCameraPosition;
+    @Nullable private LatLng pickupLocation;
+    @Nullable private Marker searchCenterMarker;
+    private String requestService;
+    private boolean searchingMechanics = false;
+    private boolean locationPermissionGranted = false;
+
+    private Button requestBtn;
+    private Button findGaragesBtn;
     private RadioGroup radioGroup;
-    private Boolean requestBol = false;
-    private driver driv;
-    private String employerMarkerInfo;
-    private DatabaseReference employer_ref;
-    private DatabaseReference employee_ref;
-    private DatabaseReference employees_searching, employees_notified, rating_ref;
-    private DatabaseReference working;
-    private boolean employer_working = false;
-    private HashMap<String, Marker> stringMarkerHashMap = new HashMap<>();
+
+    private final ActivityResultLauncher<String[]> locationPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
+                    result -> {
+                        // Approximate (coarse) location is enough to find nearby garages.
+                        locationPermissionGranted =
+                                Boolean.TRUE.equals(result.get(Manifest.permission.ACCESS_FINE_LOCATION))
+                                        || Boolean.TRUE.equals(result.get(Manifest.permission.ACCESS_COARSE_LOCATION));
+                        updateLocationUI();
+                        if (locationPermissionGranted) {
+                            findGaragesNearMe();
+                        } else {
+                            Toast.makeText(this, R.string.location_permission_needed,
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        // Retrieve location and camera position from saved instance state.
-        Log.d(TAG, "onCreate ");
-
         if (savedInstanceState != null) {
             lastKnownLocation = savedInstanceState.getParcelable(KEY_LOCATION);
-            cameraPosition = savedInstanceState.getParcelable(KEY_CAMERA_POSITION);
+            savedCameraPosition = savedInstanceState.getParcelable(KEY_CAMERA_POSITION);
         }
+        // Must run before inflation: the layout hosts the Places autocomplete fragment.
+        NearbyGarageFinder.initPlaces(this);
         setContentView(R.layout.activity_driver_map);
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
-        // Obtain the SupportMapFragment and get notified when the map is ready to be used.
-        SupportMapFragment mapFragment = (SupportMapFragment) getSupportFragmentManager()
-                .findFragmentById(R.id.map);
-        mapFragment.getMapAsync(this);
-        mAuth = FirebaseAuth.getInstance();
-        currentUser = mAuth.getCurrentUser();
-        this.setTitle(currentUser.getDisplayName());
-        FirebaseDatabase firebaseDatabase = FirebaseDatabase.getInstance();
-        mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-        employer_ref = firebaseDatabase
-                .getReference("Users")
-                .child("Employer")
-                .child(currentUser.getUid());
-        employees_searching = firebaseDatabase
-                .getReference("employees_available");
-        employees_notified = firebaseDatabase
-                .getReference("employees_notified")
-                .child(currentUser.getUid());
-        working = firebaseDatabase
-                .getReference("employers_working");
-        rating_ref = firebaseDatabase
-                .getReference("Ratings");
-        employer_ref.get().addOnCompleteListener(new OnCompleteListener<DataSnapshot>() {
-            @Override
-            public void onComplete(@NonNull Task<DataSnapshot> task) {
-                if (task.isSuccessful()) {
-//                    DataSnapshot dataSnapshot = task.getResult();
+        currentUser = FirebaseAuth.getInstance().getCurrentUser();
+        if (currentUser == null) {
+            startActivity(new Intent(this, MainActivity.class));
+            finish();
+            return;
+        }
+        setTitle(currentUser.getDisplayName());
 
-                }
-            }
-        });
-        logout_btn = findViewById(R.id.logout);
-        request_btn = findViewById(R.id.request);
-        settings_btn = findViewById(R.id.settings);
+        FirebaseDatabase db = FirebaseDatabase.getInstance();
+        employeesAvailable = db.getReference("employees_available");
+        employeesNotified = db.getReference("employees_notified").child(currentUser.getUid());
+        ratingsRef = db.getReference("Ratings");
+
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
+        garageFinder = new NearbyGarageFinder(this);
+
+        SupportMapFragment mapFragment =
+                (SupportMapFragment) getSupportFragmentManager().findFragmentById(R.id.map);
+        if (mapFragment != null) mapFragment.getMapAsync(this);
+
+        requestBtn = findViewById(R.id.request);
+        findGaragesBtn = findViewById(R.id.find_garages);
         radioGroup = findViewById(R.id.radioGroup);
-        logout_btn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
 
-                FirebaseAuth.getInstance().signOut();
-                Intent intent = new Intent(driverMapActivity.this, MainActivity.class);
-                startActivity(intent);
-                finish();
+        findViewById(R.id.logout).setOnClickListener(v -> {
+            stopMechanicSearch();
+            FirebaseAuth.getInstance().signOut();
+            startActivity(new Intent(this, MainActivity.class));
+            finish();
+        });
+        findViewById(R.id.settings).setOnClickListener(v ->
+                startActivity(new Intent(this, driverSettingsActivity.class)));
+        findGaragesBtn.setOnClickListener(v -> findGaragesNearMe());
+        requestBtn.setOnClickListener(v -> {
+            if (searchingMechanics) {
+                stopMechanicSearch();
+            } else {
+                requestMechanic();
             }
         });
-        settings_btn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                Intent intent = new Intent(driverMapActivity.this,
-                        driverSettingsActivity.class);
-                startActivity(intent);
-            }
-        });
-        PlaceAutocompleteFragment autocompleteFragment = (PlaceAutocompleteFragment)
-                getFragmentManager().findFragmentById(R.id.place_autocomplete_fragment);
 
-        autocompleteFragment.setOnPlaceSelectedListener(new PlaceSelectionListener() {
+        setUpPlaceSearch();
+    }
+
+    /** Lets the driver search garages around any address / landmark, not only their GPS fix. */
+    private void setUpPlaceSearch() {
+        AutocompleteSupportFragment autocomplete = (AutocompleteSupportFragment)
+                getSupportFragmentManager().findFragmentById(R.id.place_autocomplete_fragment);
+        if (autocomplete == null) return;
+        autocomplete.setPlaceFields(Arrays.asList(
+                Place.Field.ID, Place.Field.DISPLAY_NAME, Place.Field.LOCATION));
+        autocomplete.setHint(getString(R.string.search_garages_hint));
+        autocomplete.setOnPlaceSelectedListener(new PlaceSelectionListener() {
             @Override
             public void onPlaceSelected(@NonNull Place place) {
-                destination = place.getName().toString();
-                destinationLatLng = place.getLatLng();
+                LatLng latLng = place.getLocation();
+                if (latLng == null) return;
+                showSearchCenter(latLng, place.getDisplayName());
+                searchGaragesAround(latLng);
             }
 
             @Override
             public void onError(@NonNull Status status) {
-                Log.i(String.valueOf(driverMapActivity.this), "An error occurred: " + status);
+                Log.w(TAG, "Place autocomplete error: " + status);
             }
         });
-        request_btn.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-//                Intent intent = new Intent(EmployerMapActivity.this,
-//                        EmployeeRateActivity.class);
-//                startActivity(intent);
-                Log.d(TAG, "setOnClickListener");
+    }
 
-                if (requestBol) {
-                    endRide();
-                } else {
-                    requestEmployee();
+    @Override
+    public void onMapReady(@NonNull GoogleMap googleMap) {
+        mMap = googleMap;
+        mMap.getUiSettings().setZoomControlsEnabled(true);
+        mMap.setInfoWindowAdapter(new CustomInfoWindowAdapter(this));
+        mMap.setOnInfoWindowClickListener(marker ->
+                Toast.makeText(this, R.string.long_press_options, Toast.LENGTH_SHORT).show());
+        mMap.setOnInfoWindowLongClickListener(this::onMarkerLongPressed);
+
+        if (savedCameraPosition != null) {
+            mMap.moveCamera(CameraUpdateFactory.newCameraPosition(savedCameraPosition));
+        }
+        ensureLocationPermission();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Location
+    // ---------------------------------------------------------------------------------------
+
+    private boolean hasLocationPermission() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED
+                || ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void ensureLocationPermission() {
+        locationPermissionGranted = hasLocationPermission();
+        if (locationPermissionGranted) {
+            updateLocationUI();
+            findGaragesNearMe();
+        } else {
+            // Android 12+ shows the precise / approximate choice for this pair.
+            locationPermissionLauncher.launch(new String[]{
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION});
+        }
+    }
+
+    @SuppressLint("MissingPermission") // checked via locationPermissionGranted
+    private void updateLocationUI() {
+        if (mMap == null) return;
+        mMap.setMyLocationEnabled(locationPermissionGranted);
+        mMap.getUiSettings().setMyLocationButtonEnabled(locationPermissionGranted);
+        requestBtn.setEnabled(locationPermissionGranted);
+        findGaragesBtn.setEnabled(locationPermissionGranted);
+        if (!locationPermissionGranted) lastKnownLocation = null;
+    }
+
+    private interface LocationCallback {
+        void onLocation(@NonNull Location location);
+    }
+
+    /**
+     * Gets a fresh fix with {@code getCurrentLocation()} (the recommended replacement for
+     * relying on {@code getLastLocation()}, which is often null), falling back to the last fix.
+     */
+    @SuppressLint("MissingPermission") // checked via hasLocationPermission()
+    private void fetchCurrentLocation(@NonNull LocationCallback callback) {
+        if (!hasLocationPermission()) {
+            ensureLocationPermission();
+            return;
+        }
+        if (!vehicleFixx_Settings.isLocationEnabled(this)) {
+            Toast.makeText(this, R.string.location_unavailable, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (locationCancellation != null) locationCancellation.cancel();
+        locationCancellation = new CancellationTokenSource();
+
+        CurrentLocationRequest request = new CurrentLocationRequest.Builder()
+                .setPriority(Priority.PRIORITY_HIGH_ACCURACY)
+                .setMaxUpdateAgeMillis(MAX_LOCATION_AGE_MS)
+                .setDurationMillis(15_000)
+                .build();
+
+        fusedLocationClient.getCurrentLocation(request, locationCancellation.getToken())
+                .addOnSuccessListener(location -> {
+                    if (location != null) {
+                        lastKnownLocation = location;
+                        callback.onLocation(location);
+                        return;
+                    }
+                    fusedLocationClient.getLastLocation().addOnSuccessListener(last -> {
+                        if (last != null) {
+                            lastKnownLocation = last;
+                            callback.onLocation(last);
+                        } else {
+                            Toast.makeText(this, R.string.location_unavailable,
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                })
+                .addOnFailureListener(e -> {
+                    Log.e(TAG, "getCurrentLocation failed", e);
+                    Toast.makeText(this, R.string.location_unavailable, Toast.LENGTH_LONG).show();
+                });
+    }
+
+    private static LatLng toLatLng(@NonNull Location location) {
+        return new LatLng(location.getLatitude(), location.getLongitude());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Garages (Google Places Nearby Search)
+    // ---------------------------------------------------------------------------------------
+
+    private void findGaragesNearMe() {
+        fetchCurrentLocation(location -> {
+            if (searchCenterMarker != null) {
+                searchCenterMarker.remove();
+                searchCenterMarker = null;
+            }
+            searchGaragesAround(toLatLng(location));
+        });
+    }
+
+    private void showSearchCenter(@NonNull LatLng latLng, @Nullable String title) {
+        if (mMap == null) return;
+        if (searchCenterMarker != null) searchCenterMarker.remove();
+        searchCenterMarker = mMap.addMarker(new MarkerOptions()
+                .position(latLng)
+                .title(title)
+                .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)));
+    }
+
+    private void searchGaragesAround(@NonNull LatLng center) {
+        if (mMap == null) return;
+        mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(center, CITY_ZOOM));
+        findGaragesBtn.setEnabled(false);
+        findGaragesBtn.setText(R.string.finding_garages);
+
+        garageFinder.findGarages(center, GARAGE_RADIUS_METERS, new NearbyGarageFinder.Callback() {
+            @Override
+            public void onGaragesFound(@NonNull List<Garage> garages) {
+                if (isFinishing() || isDestroyed()) return;
+                resetGarageButton();
+                showGarages(center, garages);
+            }
+
+            @Override
+            public void onError(@NonNull Exception e) {
+                if (isFinishing() || isDestroyed()) return;
+                resetGarageButton();
+                Toast.makeText(driverMapActivity.this, R.string.garage_search_failed,
+                        Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    private void resetGarageButton() {
+        findGaragesBtn.setEnabled(locationPermissionGranted);
+        findGaragesBtn.setText(R.string.garages_near_me);
+    }
+
+    private void showGarages(@NonNull LatLng center, @NonNull List<Garage> garages) {
+        for (Marker m : garageMarkers.values()) m.remove();
+        garageMarkers.clear();
+
+        if (garages.isEmpty()) {
+            Toast.makeText(this, getString(R.string.no_garages_found,
+                    Garage.formatDistance((float) GARAGE_RADIUS_METERS)), Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        LatLngBounds.Builder bounds = new LatLngBounds.Builder().include(center);
+        for (Garage garage : garages) {
+            Marker marker = mMap.addMarker(new MarkerOptions()
+                    .position(garage.getLocation())
+                    .title(garage.getName())
+                    .icon(BitmapDescriptorFactory.fromResource(R.mipmap.gaicon)));
+            if (marker == null) continue;
+            marker.setTag(garage);
+            garageMarkers.put(garage.getPlaceId(), marker);
+        }
+        // Frame the user plus the closest few garages so the nearest one is obvious.
+        for (int i = 0; i < Math.min(5, garages.size()); i++) {
+            bounds.include(garages.get(i).getLocation());
+        }
+        mMap.animateCamera(CameraUpdateFactory.newLatLngBounds(bounds.build(), 150));
+
+        Garage nearest = garages.get(0);
+        Marker nearestMarker = garageMarkers.get(nearest.getPlaceId());
+        if (nearestMarker != null) nearestMarker.showInfoWindow();
+        Toast.makeText(this, getString(R.string.garages_found, garages.size(),
+                nearest.getFormattedDistance()), Toast.LENGTH_SHORT).show();
+    }
+
+    private void showGarageActions(@NonNull Garage garage) {
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setTitle(garage.getName())
+                .setMessage(garage.getAddress() != null ? garage.getAddress() : "")
+                .setIcon(android.R.drawable.ic_dialog_map)
+                .setPositiveButton(R.string.directions, (d, w) -> openDirections(garage))
+                .setNegativeButton(R.string.Cancel, null);
+        if (garage.getPhone() != null) {
+            dialog.setNeutralButton(R.string.call, (d, w) -> startActivity(
+                    new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + garage.getPhone()))));
+        }
+        dialog.show();
+    }
+
+    /** Opens turn-by-turn directions in Google Maps (or any maps app / browser). */
+    private void openDirections(@NonNull Garage garage) {
+        LatLng dest = garage.getLocation();
+        Uri uri = Uri.parse("https://www.google.com/maps/dir/?api=1"
+                + "&destination=" + dest.latitude + "," + dest.longitude
+                + "&destination_place_id=" + Uri.encode(garage.getPlaceId())
+                + "&travelmode=driving");
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, uri));
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, R.string.garage_search_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Registered mechanics (GeoFire radius query)
+    // ---------------------------------------------------------------------------------------
+
+    private void requestMechanic() {
+        RadioButton radioButton = findViewById(radioGroup.getCheckedRadioButtonId());
+        if (radioButton == null || radioButton.getText() == null) {
+            vehicleFixx_Settings.showAlert(this, "Select Category", "FreeLance or Repairs");
+            return;
+        }
+        requestService = radioButton.getText().toString();
+        fetchCurrentLocation(location -> startMechanicSearch(toLatLng(location)));
+    }
+
+    private void startMechanicSearch(@NonNull LatLng pickup) {
+        stopMechanicSearch();
+        searchingMechanics = true;
+        pickupLocation = pickup;
+        requestBtn.setText(R.string.searching);
+        if (mMap != null) {
+            mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(pickup, STREET_ZOOM));
+        }
+
+        // Ask the database only for mechanics inside the radius, and get live
+        // enter / move / exit updates as they go online, drive around or go offline.
+        mechanicQuery = new GeoFire(employeesAvailable)
+                .queryAtLocation(new GeoLocation(pickup.latitude, pickup.longitude), MECHANIC_RADIUS_KM);
+        mechanicQuery.addGeoQueryEventListener(new GeoQueryEventListener() {
+            @Override
+            public void onKeyEntered(String key, GeoLocation location) {
+                loadMechanic(key, new LatLng(location.latitude, location.longitude));
+            }
+
+            @Override
+            public void onKeyExited(String key) {
+                Marker marker = mechanicMarkers.remove(key);
+                if (marker != null) marker.remove();
+            }
+
+            @Override
+            public void onKeyMoved(String key, GeoLocation location) {
+                LatLng latLng = new LatLng(location.latitude, location.longitude);
+                Marker marker = mechanicMarkers.get(key);
+                if (marker != null) {
+                    marker.setPosition(latLng);
+                    updateMechanicStatus(latLng);
                 }
             }
-        });
-        Gson gson = new Gson();
-        loadCurrentUser();
-        rating_ref.addValueEventListener(new ValueEventListener() {
-            @RequiresApi(api = Build.VERSION_CODES.N)
-            @Override
-            public void onDataChange(@NonNull DataSnapshot dataSnapshot) {
-                if (dataSnapshot.exists() && dataSnapshot.getChildrenCount() > 0) {
-                    for (DataSnapshot next : dataSnapshot.getChildren()) {
-                        Log.d(TAG, "ratingsListener :getChildren: getKey   = " + next.getKey());
-                        Log.d(TAG, "ratingsListener :getChildren: getValue = " + next.getValue());
-                        /*stringMarkerHashMap.forEach((key, value) -> {
-                            Log.d(TAG, "ratingsListener :stringMarkerHashMap: stringMarkerHashMap   = " + key);
-                            Log.d(TAG, "ratingsListener :stringMarkerHashMap: getValue = " + value);
-                          if (Objects.equals(next.getKey(), key)) {
-                                Log.d(TAG, "ratingsListener :Objects.equals: rate  17654 = " + key);
-                                if (next.getKey().equals("rate")) {
-                                    Log.d(TAG, "ratingsListener :getKey().equals: rate 12345  = " + key);
-                                    if(employeeMarker!=null){
-                                        employeeMarker.remove();
-                                    }
-                                    mechanic mech = gson.fromJson(value.getSnippet(), mechanic.class);
-                                    mech.setRatings(next.getValue().toString());
-                                    value.setSnippet(gson.toJson(mech));
-                                    MarkerOptions m = new MarkerOptions()
-                                            .position(value.getPosition())
-                                            .title(value.getTitle())
-                                            .icon(BitmapDescriptorFactory.fromResource(R.mipmap.proicon))
-                                            .snippet(value.getTitle());
-                                    value.remove();
-                                    if(employeeMarker!=null){
-                                        employeeMarker.remove();
-                                    }
-                                    value = null;
-//                                    m.visible(true);
-                                    Marker marker =
-                                            mMap.addMarker(m);
 
-                                    marker.showInfoWindow();
-                                    stringMarkerHashMap.remove(mech.getId());
-                                    stringMarkerHashMap.put(mech.getId(), marker);
-//                                    mMap.clear();
-//
-//                                    getDeviceLocation();
-//                                    return;
-                                }
-                            }
-                        });*/
+            @Override
+            public void onGeoQueryReady() {
+                if (searchingMechanics && mechanicMarkers.isEmpty()) {
+                    requestBtn.setText(R.string.no_mechanics_nearby);
+                }
+            }
+
+            @Override
+            public void onGeoQueryError(DatabaseError error) {
+                Log.e(TAG, "GeoQuery error", error.toException());
+            }
+        });
+    }
+
+    private void loadMechanic(@NonNull String id, @NonNull LatLng latLng) {
+        FirebaseDatabase.getInstance().getReference("Users").child("Employee").child(id).get()
+                .addOnSuccessListener(snapshot -> {
+                    mechanic mech = snapshot.getValue(mechanic.class);
+                    if (!searchingMechanics || mech == null) return;
+                    if (requestService != null && !requestService.equals(mech.getService())) return;
+                    if (mech.getId() == null) mech.setId(id);
+                    loadRatingThenShow(id, mech, latLng);
+                })
+                .addOnFailureListener(e -> Log.e(TAG, "load mechanic " + id, e));
+    }
+
+    private void loadRatingThenShow(@NonNull String id, @NonNull mechanic mech,
+                                    @NonNull LatLng latLng) {
+        ratingsRef.child(id).addListenerForSingleValueEvent(new ValueEventListener() {
+            @Override
+            public void onDataChange(@NonNull DataSnapshot snapshot) {
+                float rate = 0;
+                for (DataSnapshot child : snapshot.getChildren()) {
+                    if ("rate".equals(child.getKey()) && child.getValue() != null) {
+                        try {
+                            rate += Float.parseFloat(child.getValue().toString());
+                        } catch (NumberFormatException ignored) {
+                            // skip malformed rating
+                        }
                     }
                 }
+                mech.setRatings(String.valueOf(rate));
+                showMechanic(id, mech, latLng);
             }
 
             @Override
             public void onCancelled(@NonNull DatabaseError error) {
-
+                showMechanic(id, mech, latLng);
             }
         });
     }
 
-    private void loadCurrentUser() {
-        employer_ref
-                .get()
-                .addOnCompleteListener(new OnCompleteListener<DataSnapshot>() {
-                    @Override
-                    public void onComplete(@NonNull Task<DataSnapshot> task) {
-                        if (task.isSuccessful()) {
-//                                loader.dismiss();
-                            Log.d(TAG, "Task" +
-                                    "<DataSnapshot> " +
-                                    "task. " +
-                                    "isSuccessful");
-                            DataSnapshot dataSnapshot1 = task.getResult();
-                            Log.d(TAG, "loadCurrentUser dataSnapshot1" +
-                                    " getKey :: " + dataSnapshot1.getKey());
-                            Log.d(TAG, "loadCurrentUser dataSnapshot1" +
-                                    " getValue :: " + dataSnapshot1.getValue());
-                            driv =
-                                    task.getResult().getValue(driver.class);
-
-                            if (driv != null) {
-                                Gson gson = new Gson();
-                                employerMarkerInfo =
-                                        gson.toJson(driv);
-
-                                Log.d(TAG,
-                                        "loadCurrentUser Employee :: " + driv.getName());
-                                Log.d(TAG,
-                                        "loadCurrentUser Employee :: " + driv.getPhone());
-                                Log.d(TAG,
-                                        "loadCurrentUser Employee :: " + driv.getEmail());
-                            } else {
-                                Log.d(TAG,
-                                        "loadCurrentUser Employee :: employer != null");
-                            }
-                        }
-                    }
-                });
+    private void showMechanic(@NonNull String id, @NonNull mechanic mech, @NonNull LatLng latLng) {
+        if (!searchingMechanics || mMap == null) return;
+        Marker old = mechanicMarkers.remove(id);
+        if (old != null) old.remove();
+        // The Marker field is not serialisable; keep it out of the JSON snippet.
+        mech.setMarker(null);
+        Marker marker = mMap.addMarker(new MarkerOptions()
+                .position(latLng)
+                .title(mech.getName())
+                .snippet(gson.toJson(mech))
+                .icon(BitmapDescriptorFactory.fromResource(R.mipmap.proicon)));
+        if (marker == null) return;
+        marker.setTag(mech);
+        mechanicMarkers.put(id, marker);
+        updateMechanicStatus(nearestMechanic());
     }
 
-    private void requestEmployee() {
-        Log.d(TAG, "requestEmployee");
-        int selectId = radioGroup.getCheckedRadioButtonId();
-        final RadioButton radioButton = findViewById(selectId);
-        if (radioButton == null) {
-            vehicleFixx_Settings.showAlert(driverMapActivity.this, "Select Category",
-                    "FreeLance or " +
-                            "Repairs");
-            return;
-        }
-        if (radioButton.getText() == null) {
-            Log.d(TAG, "radioButton.getText() == null");
-            return;
-        }
-        requestService = radioButton.getText().toString();
-        requestBol = true;
-        getDeviceLocation();
-    }
-
-    @Override
-    public void onResume(){
-        super.onResume();
-        Log.d(TAG, "onResume");
-        getDeviceLocation();
-
-    }
-    private void getDeviceLocation() {
-//        if(mMap != null){ //prevent crashing if the map doesn't exist yet (eg. on starting activity)
-//            mMap.clear();
-//            // add markers from database to the map
-//            Log.d(TAG, "getDeviceLocation :: mMap.clear()");
-//        }
-        Log.d(TAG, "getDeviceLocation");
-        try {
-            if (locationPermissionGranted) {
-                Log.d(TAG, "getDeviceLocation :: locationPermissionGranted");
-                Task<Location> locationResult = mFusedLocationClient.getLastLocation();
-                locationResult.addOnCompleteListener(new OnCompleteListener<Location>() {
-                    @Override
-                    public void onComplete(@NonNull Task<Location> task) {
-                        Log.d(TAG, "getDeviceLocation :: onComplete");
-
-                        if (task.isSuccessful()) {
-                            Log.d(TAG, "getDeviceLocation :: isSuccessful");
-
-                            lastKnownLocation = task.getResult();
-                            if (lastKnownLocation != null) {
-                                Log.d(TAG, "getDeviceLocation :: lastKnownLocation != null");
-
-                                mMap.moveCamera(CameraUpdateFactory.newLatLngZoom(
-                                        new LatLng(lastKnownLocation.getLatitude(),
-                                                lastKnownLocation.getLongitude()), FAR_ZOOM));
-                                final GeoFire geoFireAvailable = new GeoFire(employees_searching);
-                                final GeoFire geoFireWorking = new GeoFire(working);
-                                if (!employer_working) {
-                                    employer_working = true;
-                                    Log.d(TAG, "getDeviceLocation :: isSuccessful");
-
-                                    pickupLocation =
-                                            new LatLng(lastKnownLocation.getLatitude(),
-                                                    lastKnownLocation.getLongitude());
-                                    Bitmap bitmap = null;
-                                    Bitmap.Config conf = Bitmap.Config.ARGB_8888;
-                                    Bitmap bmp = Bitmap.createBitmap(80, 80, conf);
-                                    Canvas canvas1 = new Canvas(bmp);
-                                    // paint defines the text color, stroke width and size
-                                    Paint color = new Paint();
-                                    color.setTextSize(35);
-                                    color.setColor(Color.BLACK);
-                                    MarkerOptions employerOptions = new MarkerOptions()
-                                            .position(pickupLocation)
-                                            .title("Job location")
-                                            // Specifies the anchor to be at a particular point in the marker image.
-                                            .anchor(0.5f, 1);
-
-                                    employerOptions.icon(BitmapDescriptorFactory.fromResource(R.mipmap.jobicon));
-                                    employerMarker = mMap.addMarker(employerOptions);
-
-                                    request_btn.setText(getResources().getText(R.string.searching));
-                                    employees_searching.addValueEventListener(new ValueEventListener() {
-                                        @Override
-                                        public void onDataChange(@NonNull DataSnapshot dataSnapshot) {
-                                            for (DataSnapshot data : dataSnapshot.getChildren()) {
-                                                if (data.getKey() != null) {
-                                                    Log.d(TAG,
-                                                            "employees_searching getKey :: " + data.getKey());
-                                                    Log.d(TAG,
-                                                            "employees_searching getValue :: " + data.getValue());
-                                                    driverRequest employerRequest = data.getValue(driverRequest.class);
-                                                    List<Double> map = (List<Double>) employerRequest.getL();
-                                                    double locationLat = 0;
-                                                    double locationLng = 0;
-                                                    if (map.get(0) != null) {
-                                                        locationLat = Double.parseDouble(map.get(0).toString());
-                                                    }
-                                                    if (map.get(1) != null) {
-                                                        locationLng = Double.parseDouble(map.get(1).toString());
-                                                    }
-                                                    LatLng employeeLatLng = new LatLng(locationLat, locationLng);
-                                                    if (employeeMarker != null) {
-                                                        employeeMarker.remove();
-                                                    }
-
-                                                    Location loc1 = new Location("");
-                                                    loc1.setLatitude(pickupLocation.latitude);
-                                                    loc1.setLongitude(pickupLocation.longitude);
-
-                                                    Location loc2 = new Location("");
-                                                    loc2.setLatitude(employeeLatLng.latitude);
-                                                    loc2.setLongitude(employeeLatLng.longitude);
-
-                                                    float distance = loc1.distanceTo(loc2);
-
-                                                    FirebaseDatabase
-                                                            .getInstance()
-                                                            .getReference("Users")
-                                                            .child("Employee")
-                                                            .child(data.getKey())
-                                                            .get()
-                                                            .addOnCompleteListener(new OnCompleteListener<DataSnapshot>() {
-                                                                @Override
-                                                                public void onComplete(@NonNull Task<DataSnapshot> task) {
-                                                                    if (task.isSuccessful()) {
-                                                                        Log.d(TAG, "Task" +
-                                                                                "<DataSnapshot> " +
-                                                                                "task. " +
-                                                                                "isSuccessful");
-                                                                        DataSnapshot dataSnapshot1 = task.getResult();
-                                                                        Log.d(TAG, "dataSnapshot1" +
-                                                                                " getKey :: " + dataSnapshot1.getKey());
-                                                                        Log.d(TAG, "dataSnapshot1" +
-                                                                                " getValue :: " + dataSnapshot1.getValue());
-                                                                        mechanic mech =
-                                                                                task.getResult().getValue(mechanic.class);
-                                                                        if (mech != null) {
-                                                                            Log.d(TAG,
-                                                                                    "Employee :: " + mech.getName());
-                                                                            Log.d(TAG,
-                                                                                    "Employee :: " + mech.getPhone());
-                                                                            Log.d(TAG,
-                                                                                    "Employee :: " + mech.getProfileImageUrl());
-
-
-                                                                            if (mech.getService().equals(requestService)) {
-                                                                                Gson gson = new Gson();
-
-                                                                                if (distance < 100) {
-                                                                                    mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
-                                                                                            new LatLng(lastKnownLocation.getLatitude(),
-                                                                                                    lastKnownLocation.getLongitude()), CLOSE_ZOOM));
-                                                                                    request_btn.setText("mechanic is Here");
-                                                                                } else {
-                                                                                    mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(
-                                                                                            new LatLng(lastKnownLocation.getLatitude(),
-                                                                                                    lastKnownLocation.getLongitude()), MID_ZOOM));
-                                                                                    request_btn.setText("mechanic Found: " + distance / 1000 + " KM away");
-                                                                                }
-                                                                                rating_ref
-                                                                                        .child(mech.getId())
-                                                                                        .addValueEventListener(
-                                                                                                new ValueEventListener() {
-                                                                                                    @Override
-                                                                                                    public void onDataChange(@NonNull DataSnapshot dataSnapshot) {
-                                                                                                        float rate = 0;
-                                                                                                        if (dataSnapshot.exists() && dataSnapshot.getChildrenCount() > 0) {
-                                                                                                            for (DataSnapshot next : dataSnapshot.getChildren()) {
-                                                                                                                Log.d(TAG, "ratingsListener :getDeviceLocation: getKey   = " + next.getKey());
-                                                                                                                Log.d(TAG, "ratingsListener :getDeviceLocation: getValue = " + next.getValue());
-                                                                                                                if (next.getKey().equals("rate")) {
-                                                                                                                    rate += Float.parseFloat(next.getValue().toString());
-                                                                                                                }
-                                                                                                            }
-                                                                                                        }
-                                                                                                        mech.setRatings(String.valueOf(rate));
-                                                                                                        String markerInfoString =
-                                                                                                                gson.toJson(mech);
-                                                                                                        MarkerOptions m = new MarkerOptions()
-                                                                                                                .position(employeeLatLng)
-                                                                                                                .title(mech.getName())
-                                                                                                                .icon(BitmapDescriptorFactory.fromResource(R.mipmap.gaicon))
-                                                                                                                .snippet(markerInfoString);
-                                                                                                        Marker marker =
-                                                                                                                mMap.addMarker(m);
-
-                                                                                                        stringMarkerHashMap.put(mech.getId(), marker);
-
-                                                                                                    }
-
-                                                                                                    @Override
-                                                                                                    public void onCancelled(@NonNull DatabaseError error) {
-
-                                                                                                    }
-                                                                                                });
-                                                                            }
-
-                                                                        }
-
-                                                                    } else {
-                                                                        Log.d(TAG, "Task" +
-                                                                                "<DataSnapshot> " +
-                                                                                "task. " +
-                                                                                "Not isSuccessful");
-                                                                        Log.e(TAG, Objects.requireNonNull(task.getException()).getMessage(),
-                                                                                task.getException());
-                                                                    }
-                                                                }
-                                                            });
-                                                }
-                                            }
-                                        }
-                                        @Override
-                                        public void onCancelled(@NonNull DatabaseError error) {
-                                            Log.d(TAG, "getDeviceLocation :: onCancelled");
-                                            Log.e(TAG, error.getMessage(), error.toException());
-                                        }
-                                    });
-                                }
-                            } else {
-                                Log.d(TAG, "getDeviceLocation :: lastKnownLocation == null");
-
-                            }
-                        } else {
-                            Log.d(TAG, "getDeviceLocation " + task.getException().getMessage());
-                        }
-                    }
-                });
+    @Nullable
+    private LatLng nearestMechanic() {
+        if (pickupLocation == null) return null;
+        LatLng best = null;
+        float bestDist = Float.MAX_VALUE;
+        for (Marker m : mechanicMarkers.values()) {
+            float d = NearbyGarageFinder.distanceBetween(pickupLocation, m.getPosition());
+            if (d < bestDist) {
+                bestDist = d;
+                best = m.getPosition();
             }
-        } catch (SecurityException e) {
-            Log.e("Exception: %s", e.getMessage(), e);
         }
+        return best;
     }
 
-    private void endRide() {
-        request_btn.setBackground(getResources().getDrawable(R.drawable.button_green));
-        request_btn.setText(getResources().getText(R.string.search_mechanic));
-        requestBol = true;
-    }
-
-    /**
-     * Manipulates the map once available.
-     * This callback is triggered when the map is ready to be used.
-     * This is where we can add markers or lines, add listeners or move the camera. In this case,
-     * we just add a marker near Sydney, Australia.
-     * If Google Play services is not installed on the device, the user will be prompted to install
-     * it inside the SupportMapFragment. This method will only be triggered once the user has
-     * installed Google Play services and returned to the app.
-     */
-    @Override
-    public void onMapReady(GoogleMap googleMap) {
-        Log.d(TAG, "onMapReady");
-        mMap = googleMap;
-
-        // Prompt the user for permission.
-        getLocationPermission();
-
-        // Turn on the My Location layer and the related control on the map.
-        updateLocationUI();
-    }
-
-    private void updateLocationUI() {
-        if (mMap == null) {
-            return;
-        }
-        try {
-            if (locationPermissionGranted) {
-                mMap.setMyLocationEnabled(true);
-                mMap.getUiSettings().setMyLocationButtonEnabled(true);
-                mMap.setInfoWindowAdapter(new CustomInfoWindowAdapter(driverMapActivity.this));
-                mMap.setOnInfoWindowClickListener(new GoogleMap.OnInfoWindowClickListener() {
-                    @Override
-                    public void onInfoWindowClick(Marker marker) {
-                        Toast.makeText(driverMapActivity.this, "Long press to hire",
-                                Toast.LENGTH_SHORT).show();
-                    }
-                });
-
-                mMap.setOnInfoWindowLongClickListener(new GoogleMap.OnInfoWindowLongClickListener() {
-                    @Override
-                    public void onInfoWindowLongClick(@NonNull Marker marker) {
-                        Gson gson = new Gson();
-                        mechanic mech = gson.fromJson(marker.getSnippet(), mechanic.class);
-                        new AlertDialog.Builder(driverMapActivity.this)
-                                .setTitle("Hire this mechanic")
-                                .setMessage("Would you like to notify this mechanic?")
-                                .setIcon(android.R.drawable.ic_dialog_info)
-                                .setPositiveButton(android.R.string.yes, new DialogInterface.OnClickListener() {
-
-                                    public void onClick(DialogInterface dialog, int whichButton) {
-                                        Log.d(TAG, "setOnInfoWindowLongClickListener :: AlertDialog");
-                                        SendSms mSmsTask =
-                                                new SendSms(driverMapActivity.this,
-                                                        currentUser.getDisplayName(),
-                                                        currentUser.getUid(),
-                                                        mech.getId(),
-                                                        pickupLocation,
-                                                        employees_notified, marker);
-                                        mechanic[] emps = {mech};
-
-                                        try {
-                                            String re = mSmsTask.execute(emps).get(2,
-                                                    TimeUnit.SECONDS);
-                                            Log.d(TAG, "setOnInfoWindowLongClickListener :: " +
-                                                    "mSmsTask.execute: " + re);
-                                        } catch (ExecutionException e) {
-                                            Log.e(TAG,
-                                                    "setOnInfoWindowLongClickListener :ExecutionException: " + e.getMessage(), e.fillInStackTrace());
-                                        } catch (InterruptedException e) {
-                                            Log.e(TAG,
-                                                    "setOnInfoWindowLongClickListener :InterruptedException: " + e.getMessage(), e.fillInStackTrace());
-                                        } catch (TimeoutException e) {
-                                            Log.e(TAG,
-                                                    "setOnInfoWindowLongClickListener :TimeoutException: " + e.getMessage(), e.fillInStackTrace());
-                                        }
-
-                                        if (mSmsTask.getStatus() == AsyncTask.Status.FINISHED) {
-                                            Log.d(TAG, "setOnInfoWindowLongClickListener :: AsyncTask.Status.FINISHED");
-                                        }
-                                    }
-                                })
-                                .setNegativeButton(android.R.string.no,
-                                        null)
-                                .setNeutralButton(R.string.rate, new DialogInterface.OnClickListener() {
-                                    @Override
-                                    public void onClick(DialogInterface dialog, int which) {
-                                        Intent intent = new Intent(driverMapActivity.this,
-                                                mechanicRateActivity.class);
-                                        intent.putExtra("mechanic", mech.getId());
-                                        intent.putExtra("driver", currentUser.getUid());
-                                        startActivityForResult(intent, RATE_REQUEST);
-                                        employeeMarker = marker;
-                                        marker.showInfoWindow();
-                                    }
-                                }).show();
-                        Log.d(TAG, "setOnInfoWindowLongClickListener :: onInfoWindowLongClick");
-                    }
-                });
-                request_btn.setEnabled(true);
-            } else {
-                request_btn.setEnabled(false);
-                mMap.setMyLocationEnabled(false);
-                mMap.getUiSettings().setMyLocationButtonEnabled(false);
-                lastKnownLocation = null;
-                getLocationPermission();
+    private void updateMechanicStatus(@Nullable LatLng mechanicLatLng) {
+        if (!searchingMechanics || pickupLocation == null || mechanicLatLng == null) return;
+        float distance = NearbyGarageFinder.distanceBetween(pickupLocation, mechanicLatLng);
+        if (distance < ARRIVED_METERS) {
+            requestBtn.setText(R.string.mechanic_here);
+            if (mMap != null) {
+                mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(pickupLocation, CLOSE_ZOOM));
             }
-        } catch (SecurityException e) {
-            Log.e("Exception: %s", e.getMessage());
+        } else {
+            requestBtn.setText(getString(R.string.mechanic_found, Garage.formatDistance(distance)));
+        }
+    }
+
+    private void stopMechanicSearch() {
+        if (mechanicQuery != null) {
+            mechanicQuery.removeAllListeners();
+            mechanicQuery = null;
+        }
+        for (Marker m : mechanicMarkers.values()) m.remove();
+        mechanicMarkers.clear();
+        searchingMechanics = false;
+        if (requestBtn != null) {
+            requestBtn.setBackground(ContextCompat.getDrawable(this, R.drawable.button_green));
+            requestBtn.setText(R.string.search_mechanic);
+        }
+    }
+
+    private void showHireDialog(@NonNull mechanic mech, @NonNull Marker marker) {
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.hire_mechanic_title)
+                .setMessage(R.string.hire_mechanic_message)
+                .setIcon(android.R.drawable.ic_dialog_info)
+                .setPositiveButton(android.R.string.yes, (dialog, which) -> {
+                    String name = currentUser.getDisplayName() != null
+                            ? currentUser.getDisplayName() : "";
+                    // Runs in the background; SendSms reports its own progress / result.
+                    new SendSms(this, name, currentUser.getUid(), mech.getId(),
+                            pickupLocation, employeesNotified, marker).execute(mech);
+                })
+                .setNegativeButton(android.R.string.no, null)
+                .setNeutralButton(R.string.rate, (dialog, which) -> {
+                    Intent intent = new Intent(this, mechanicRateActivity.class);
+                    intent.putExtra("mechanic", mech.getId());
+                    intent.putExtra("driver", currentUser.getUid());
+                    startActivityForResult(intent, RATE_REQUEST);
+                })
+                .show();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Markers & lifecycle
+    // ---------------------------------------------------------------------------------------
+
+    private void onMarkerLongPressed(@NonNull Marker marker) {
+        Object tag = marker.getTag();
+        if (tag instanceof Garage) {
+            showGarageActions((Garage) tag);
+        } else if (tag instanceof mechanic) {
+            showHireDialog((mechanic) tag, marker);
         }
     }
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-
-    }
-
-
-
-    private void updateEmployeeRef(mechanic mech) {
-        final GeoFire geoFireNotified = new GeoFire(employees_notified);
-        if (pickupLocation == null) {
-            Log.e(TAG, "geoFireNotified.updateEmployeeRef :: pickupLocation==null");
-        } else {
-            Log.e(TAG, "geoFireNotified.updateEmployeeRef :: pickupLocation");
-        }
-        if (mech == null) {
-            Log.e(TAG, "geoFireNotified.updateEmployeeRef :: employee==null");
-        } else {
-            Log.e(TAG, "geoFireNotified.updateEmployeeRef :: employee " + mech.getName());
-            Log.d(TAG, "geoFireNotified.updateEmployeeRef :: getId " + mech.getId());
-        }
-        String employee_id = "" + mech.getId();
-        geoFireNotified.setLocation(employee_id, new GeoLocation(pickupLocation.latitude,
-                pickupLocation.longitude), new GeoFire.CompletionListener() {
-            @Override
-            public void onComplete(String key, DatabaseError error) {
-                if (error != null) {
-                    Log.d(TAG, error.getMessage(), error.toException());
-                } else {
-                    Log.d(TAG, "geoFireNotified.setLocation :: " +
-                            key);
-                    Log.d(TAG,
-                            "successfully setLocation " +
-                                    "geoFireNotified :: " + currentUser.getUid());
-                    HashMap<String, Object> emp = new HashMap<>();
-                    emp.put("employer_uuid", currentUser.getUid());
-                    employees_notified
-                            .child(mech.getId())
-                            .updateChildren(emp)
-                            .addOnCompleteListener(new OnCompleteListener<Void>() {
-                                @Override
-                                public void onComplete(@NonNull Task<Void> task) {
-                                    if (task.isSuccessful()) {
-                                        Log.d(TAG, "employees_notified :: isSuccessful");
-                                    } else {
-                                        if (task.getException() != null) {
-                                            Log.d(TAG, "employees_notified :: getException",
-                                                    task.getException());
-                                        } else {
-                                            Log.d(TAG, "employees_notified :: getException ERROR " +
-                                                    "EER");
-                                        }
-                                    }
-                                }
-                            });
-                }
-            }
-        });
-    }
-
-    private void getLocationPermission() {
-        if (ContextCompat.checkSelfPermission(this.getApplicationContext(),
-                android.Manifest.permission.ACCESS_FINE_LOCATION)
-                == PackageManager.PERMISSION_GRANTED) {
-            locationPermissionGranted = true;
-            Log.d(TAG, "locationPermissionGranted");
-
-        } else {
-            ActivityCompat.requestPermissions(this,
-                    new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION},
-                    PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION);
-        }
-    }
-
-    @Override
-    protected void onSaveInstanceState(Bundle outState) {
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
         if (mMap != null) {
             outState.putParcelable(KEY_CAMERA_POSITION, mMap.getCameraPosition());
             outState.putParcelable(KEY_LOCATION, lastKnownLocation);
@@ -734,24 +649,9 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
     }
 
     @Override
-    public void onRequestPermissionsResult(int requestCode,
-                                           @NonNull String[] permissions,
-                                           @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        locationPermissionGranted = false;
-        switch (requestCode) {
-            case PERMISSIONS_REQUEST_ACCESS_FINE_LOCATION: {
-                // If request is cancelled, the result arrays are empty.
-                if (grantResults.length > 0
-                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    locationPermissionGranted = true;
-                    updateLocationUI();
-                }
-            }
-            default:
-                Log.d(TAG, "onRequestPermissionsResult");
-        }
-        updateLocationUI();
+    protected void onDestroy() {
+        if (locationCancellation != null) locationCancellation.cancel();
+        if (mechanicQuery != null) mechanicQuery.removeAllListeners();
+        super.onDestroy();
     }
-
 }
