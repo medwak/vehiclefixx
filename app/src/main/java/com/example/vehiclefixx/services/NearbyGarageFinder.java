@@ -8,11 +8,14 @@ import androidx.annotation.NonNull;
 
 import com.example.vehiclefixx.BuildConfig;
 import com.example.vehiclefixx.data.Garage;
+import com.example.vehiclefixx.data.VehicleType;
 import com.google.android.gms.maps.model.LatLng;
 import com.google.android.libraries.places.api.Places;
 import com.google.android.libraries.places.api.model.CircularBounds;
 import com.google.android.libraries.places.api.model.Place;
+import com.google.android.libraries.places.api.model.RectangularBounds;
 import com.google.android.libraries.places.api.net.PlacesClient;
+import com.google.android.libraries.places.api.net.SearchByTextRequest;
 import com.google.android.libraries.places.api.net.SearchNearbyRequest;
 
 import java.util.ArrayList;
@@ -21,17 +24,15 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Finds real garages around a point with the Places SDK for Android using
- * Places API (New) Nearby Search, ranked by distance.
+ * Finds real garages around a point with the Places SDK for Android (Places API New),
+ * ranked by distance, for the driver's {@link VehicleType}: Nearby Search by place type for
+ * cars, Text Search for motorbike and lorry workshops.
  *
  * <p>This replaces the retired {@code com.google.android.gms.location.places} API.
  * The API key must have "Places API (New)" enabled.
  */
 public final class NearbyGarageFinder {
     private static final String TAG = "NearbyGarageFinder";
-
-    /** Google place types that represent places that fix vehicles. */
-    private static final List<String> GARAGE_TYPES = Arrays.asList("car_repair");
 
     /** Only request the fields we show: Places bills by field mask. */
     private static final List<Place.Field> FIELDS = Arrays.asList(
@@ -45,7 +46,7 @@ public final class NearbyGarageFinder {
             Place.Field.CURRENT_OPENING_HOURS,
             Place.Field.UTC_OFFSET);
 
-    /** Places Nearby Search returns at most 20 results per request. */
+    /** Places Nearby / Text Search return at most 20 results per request. */
     private static final int MAX_RESULTS = 20;
 
     public interface Callback {
@@ -70,34 +71,63 @@ public final class NearbyGarageFinder {
     }
 
     /**
-     * Searches for garages within {@code radiusMeters} (max 50 000) of {@code center},
-     * nearest first.
+     * Searches for garages that repair {@code vehicleType} within {@code radiusMeters}
+     * (max 50 000) of {@code center}, nearest first.
      */
     public void findGarages(@NonNull LatLng center, double radiusMeters,
-                            @NonNull Callback callback) {
-        SearchNearbyRequest request = SearchNearbyRequest
-                .builder(CircularBounds.newInstance(center, Math.min(radiusMeters, 50_000)), FIELDS)
-                .setIncludedTypes(GARAGE_TYPES)
-                .setMaxResultCount(MAX_RESULTS)
-                .setRankPreference(SearchNearbyRequest.RankPreference.DISTANCE)
-                .build();
+                            @NonNull VehicleType vehicleType, @NonNull Callback callback) {
+        double radius = Math.min(radiusMeters, 50_000);
+        if (vehicleType.getPlaceType() != null) {
+            SearchNearbyRequest request = SearchNearbyRequest
+                    .builder(CircularBounds.newInstance(center, radius), FIELDS)
+                    .setIncludedTypes(Collections.singletonList(vehicleType.getPlaceType()))
+                    .setMaxResultCount(MAX_RESULTS)
+                    .setRankPreference(SearchNearbyRequest.RankPreference.DISTANCE)
+                    .build();
+            placesClient.searchNearby(request)
+                    .addOnSuccessListener(r -> deliver(r.getPlaces(), center, radius, callback))
+                    .addOnFailureListener(e -> fail(e, callback));
+        } else {
+            // Text Search only accepts a rectangle as a hard restriction; results are
+            // trimmed to the circle afterwards.
+            SearchByTextRequest request = SearchByTextRequest
+                    .builder(vehicleType.getTextQuery(), FIELDS)
+                    .setLocationRestriction(boundsAround(center, radius))
+                    .setMaxResultCount(MAX_RESULTS)
+                    .setRankPreference(SearchByTextRequest.RankPreference.DISTANCE)
+                    .build();
+            placesClient.searchByText(request)
+                    .addOnSuccessListener(r -> deliver(r.getPlaces(), center, radius, callback))
+                    .addOnFailureListener(e -> fail(e, callback));
+        }
+    }
 
-        placesClient.searchNearby(request)
-                .addOnSuccessListener(response -> {
-                    List<Garage> garages = new ArrayList<>();
-                    for (Place place : response.getPlaces()) {
-                        if (place.getId() == null || place.getLocation() == null) continue;
-                        garages.add(toGarage(place, center));
-                    }
-                    // Already distance-ranked by the API; sort defensively by straight-line distance.
-                    Collections.sort(garages,
-                            (a, b) -> Float.compare(a.getDistanceMeters(), b.getDistanceMeters()));
-                    callback.onGaragesFound(garages);
-                })
-                .addOnFailureListener(e -> {
-                    Log.e(TAG, "searchNearby failed", e);
-                    callback.onError(e);
-                });
+    private static void deliver(@NonNull List<Place> places, @NonNull LatLng center,
+                                double radius, @NonNull Callback callback) {
+        List<Garage> garages = new ArrayList<>();
+        for (Place place : places) {
+            if (place.getId() == null || place.getLocation() == null) continue;
+            Garage garage = toGarage(place, center);
+            if (garage.getDistanceMeters() <= radius) garages.add(garage);
+        }
+        Collections.sort(garages,
+                (a, b) -> Float.compare(a.getDistanceMeters(), b.getDistanceMeters()));
+        callback.onGaragesFound(garages);
+    }
+
+    private static void fail(@NonNull Exception e, @NonNull Callback callback) {
+        Log.e(TAG, "Places garage search failed", e);
+        callback.onError(e);
+    }
+
+    /** Square that encloses the circle of {@code radiusMeters} around {@code center}. */
+    @NonNull
+    private static RectangularBounds boundsAround(@NonNull LatLng center, double radiusMeters) {
+        double latDelta = Math.toDegrees(radiusMeters / 6_371_000d);
+        double lngDelta = latDelta / Math.max(Math.cos(Math.toRadians(center.latitude)), 0.01);
+        return RectangularBounds.newInstance(
+                new LatLng(Math.max(center.latitude - latDelta, -90), center.longitude - lngDelta),
+                new LatLng(Math.min(center.latitude + latDelta, 90), center.longitude + lngDelta));
     }
 
     @NonNull

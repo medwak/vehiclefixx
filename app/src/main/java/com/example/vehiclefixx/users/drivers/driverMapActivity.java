@@ -3,7 +3,9 @@ package com.example.vehiclefixx.users.drivers;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.location.Location;
 import android.net.Uri;
@@ -27,6 +29,7 @@ import androidx.fragment.app.FragmentActivity;
 import com.example.vehiclefixx.MainActivity;
 import com.example.vehiclefixx.R;
 import com.example.vehiclefixx.data.Garage;
+import com.example.vehiclefixx.data.VehicleType;
 import com.example.vehiclefixx.data.mechanic;
 import com.example.vehiclefixx.services.NearbyGarageFinder;
 import com.example.vehiclefixx.services.SendSms;
@@ -67,6 +70,7 @@ import com.google.gson.Gson;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -76,8 +80,9 @@ import java.util.Map;
  *     <li>Location: fused provider {@code getCurrentLocation()} (fresh, high accuracy) with a
  *     fallback to the last known fix, requested through the Activity Result permission API
  *     (fine or approximate location both work).</li>
- *     <li>Garages: Google Places API (New) Nearby Search for {@code car_repair}, ranked by
- *     distance, so real garages show up even if they never registered in the app.</li>
+ *     <li>Garages: Google Places API (New) search, ranked by distance, for the driver's
+ *     vehicle type (car, motorbike or lorry), so real garages show up even if they never
+ *     registered in the app.</li>
  *     <li>Mechanics: a GeoFire radius query on {@code employees_available} instead of downloading
  *     every mechanic and filtering on the phone.</li>
  *     <li>Search elsewhere: Places autocomplete moves the search to any place the driver picks.</li>
@@ -103,6 +108,8 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
     private static final String KEY_CAMERA_POSITION = "camera_position";
     private static final String KEY_LOCATION = "location";
     private static final int RATE_REQUEST = 1254;
+    private static final String PREFS = "driver_map";
+    private static final String PREF_VEHICLE_TYPE = "vehicle_type";
 
     private final Gson gson = new Gson();
     private final Map<String, Marker> garageMarkers = new HashMap<>();
@@ -123,6 +130,9 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
     @Nullable private CameraPosition savedCameraPosition;
     @Nullable private LatLng pickupLocation;
     @Nullable private Marker searchCenterMarker;
+    /** Where the last garage search ran, so changing vehicle type can re-run it there. */
+    @Nullable private LatLng lastSearchCenter;
+    @NonNull private VehicleType vehicleType = VehicleType.CAR;
     private String requestService;
     private boolean searchingMechanics = false;
     private boolean locationPermissionGranted = false;
@@ -130,6 +140,7 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
     private Button requestBtn;
     private Button findGaragesBtn;
     private RadioGroup radioGroup;
+    private RadioGroup vehicleTypeGroup;
 
     private final ActivityResultLauncher<String[]> locationPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
@@ -183,6 +194,8 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
         requestBtn = findViewById(R.id.request);
         findGaragesBtn = findViewById(R.id.find_garages);
         radioGroup = findViewById(R.id.radioGroup);
+        vehicleTypeGroup = findViewById(R.id.vehicle_type_group);
+        setUpVehicleTypePicker();
 
         findViewById(R.id.logout).setOnClickListener(v -> {
             stopMechanicSearch();
@@ -202,6 +215,48 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
         });
 
         setUpPlaceSearch();
+    }
+
+    /**
+     * Car / motorbike / lorry picker. The choice is remembered and changing it re-runs the
+     * garage search at the same spot.
+     */
+    private void setUpVehicleTypePicker() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        vehicleType = VehicleType.fromName(prefs.getString(PREF_VEHICLE_TYPE, null));
+        vehicleTypeGroup.check(radioIdFor(vehicleType));
+        vehicleTypeGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            VehicleType selected = vehicleTypeFor(checkedId);
+            if (selected == vehicleType) return;
+            vehicleType = selected;
+            prefs.edit().putString(PREF_VEHICLE_TYPE, selected.name()).apply();
+            if (lastSearchCenter != null) searchGaragesAround(lastSearchCenter);
+        });
+    }
+
+    private static int radioIdFor(@NonNull VehicleType type) {
+        switch (type) {
+            case MOTORBIKE:
+                return R.id.vehicle_motorbike;
+            case LORRY:
+                return R.id.vehicle_lorry;
+            case CAR:
+            default:
+                return R.id.vehicle_car;
+        }
+    }
+
+    @NonNull
+    private static VehicleType vehicleTypeFor(int radioId) {
+        // if/else, not switch: R.id values are not compile-time constants under AGP 8.
+        if (radioId == R.id.vehicle_motorbike) return VehicleType.MOTORBIKE;
+        if (radioId == R.id.vehicle_lorry) return VehicleType.LORRY;
+        return VehicleType.CAR;
+    }
+
+    @NonNull
+    private String vehicleLabel() {
+        return getString(vehicleType.getLabel()).toLowerCase(Locale.getDefault());
     }
 
     /** Lets the driver search garages around any address / landmark, not only their GPS fix. */
@@ -356,14 +411,19 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
 
     private void searchGaragesAround(@NonNull LatLng center) {
         if (mMap == null) return;
+        lastSearchCenter = center;
         mMap.animateCamera(CameraUpdateFactory.newLatLngZoom(center, CITY_ZOOM));
         findGaragesBtn.setEnabled(false);
         findGaragesBtn.setText(R.string.finding_garages);
 
-        garageFinder.findGarages(center, GARAGE_RADIUS_METERS, new NearbyGarageFinder.Callback() {
+        final VehicleType searchedType = vehicleType;
+        garageFinder.findGarages(center, GARAGE_RADIUS_METERS, searchedType,
+                new NearbyGarageFinder.Callback() {
             @Override
             public void onGaragesFound(@NonNull List<Garage> garages) {
                 if (isFinishing() || isDestroyed()) return;
+                // Ignore a stale answer if the driver switched vehicle type meanwhile.
+                if (searchedType != vehicleType) return;
                 resetGarageButton();
                 showGarages(center, garages);
             }
@@ -388,7 +448,7 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
         garageMarkers.clear();
 
         if (garages.isEmpty()) {
-            Toast.makeText(this, getString(R.string.no_garages_found,
+            Toast.makeText(this, getString(R.string.no_garages_found, vehicleLabel(),
                     Garage.formatDistance((float) GARAGE_RADIUS_METERS)), Toast.LENGTH_LONG).show();
             return;
         }
@@ -412,7 +472,7 @@ public class driverMapActivity extends FragmentActivity implements OnMapReadyCal
         Garage nearest = garages.get(0);
         Marker nearestMarker = garageMarkers.get(nearest.getPlaceId());
         if (nearestMarker != null) nearestMarker.showInfoWindow();
-        Toast.makeText(this, getString(R.string.garages_found, garages.size(),
+        Toast.makeText(this, getString(R.string.garages_found, garages.size(), vehicleLabel(),
                 nearest.getFormattedDistance()), Toast.LENGTH_SHORT).show();
     }
 

@@ -68,8 +68,12 @@
     <string name="garages_near_me">Garages near me</string>
     <string name="search_garages_hint">Search garages near a place</string>
     <string name="finding_garages">Finding garages…</string>
-    <string name="garages_found">%1$d garages found, nearest %2$s away</string>
-    <string name="no_garages_found">No garages found within %1$s</string>
+    <string name="my_vehicle">My vehicle</string>
+    <string name="vehicle_car">Car</string>
+    <string name="vehicle_motorbike">Motorbike</string>
+    <string name="vehicle_lorry">Lorry</string>
+    <string name="garages_found">%1$d %2$s garages found, nearest %3$s away</string>
+    <string name="no_garages_found">No %1$s garages found within %2$s</string>
     <string name="garage_search_failed">Could not load nearby garages. Check your connection and API key.</string>
     <string name="location_unavailable">Could not get your location. Turn on location and try again.</string>
     <string name="location_permission_needed">Location permission is needed to find garages near you.</string>

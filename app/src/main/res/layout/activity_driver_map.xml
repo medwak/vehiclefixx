@@ -65,6 +65,42 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content">
 
+    <!-- Which vehicle needs fixing: decides which garages are searched. -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingStart="8dp"
+        android:paddingTop="6dp"
+        android:text="@string/my_vehicle"
+        android:textColor="@color/black"
+        android:textStyle="bold"
+        tools:ignore="RtlSymmetry" />
+    <RadioGroup
+        android:id="@+id/vehicle_type_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:checkedButton="@+id/vehicle_car"
+        android:background="@color/white">
+        <RadioButton
+            android:id="@+id/vehicle_car"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/vehicle_car" />
+        <RadioButton
+            android:id="@+id/vehicle_motorbike"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/vehicle_motorbike" />
+        <RadioButton
+            android:id="@+id/vehicle_lorry"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:text="@string/vehicle_lorry" />
+    </RadioGroup>
     <RadioGroup
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
